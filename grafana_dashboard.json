@@ -1,0 +1,103 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": null,
+    "title": "M365 — Telemetry",
+    "timezone": "browser",
+    "panels": [
+      {
+        "type": "stat",
+        "title": "SOC (estimate)",
+        "gridPos": {
+          "h": 6,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "query": "integral(mean(\"i_batt_a\"))",
+            "datasource": {
+              "type": "influxdb",
+              "uid": "${DS_INFLUXDB}"
+            }
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "Battery Voltage / Current",
+        "gridPos": {
+          "h": 9,
+          "w": 12,
+          "x": 6,
+          "y": 0
+        },
+        "targets": [
+          {
+            "query": "from(bucket:\"scooter\") |> range(start: -1h)",
+            "datasource": {
+              "type": "influxdb",
+              "uid": "${DS_INFLUXDB}"
+            }
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "Temperatures (Batt / Ctrl)",
+        "gridPos": {
+          "h": 9,
+          "w": 12,
+          "x": 0,
+          "y": 6
+        },
+        "targets": [
+          {
+            "query": "",
+            "datasource": {
+              "type": "influxdb",
+              "uid": "${DS_INFLUXDB}"
+            }
+          }
+        ]
+      },
+      {
+        "type": "timeseries",
+        "title": "Speed & Power",
+        "gridPos": {
+          "h": 9,
+          "w": 12,
+          "x": 12,
+          "y": 6
+        },
+        "targets": [
+          {
+            "query": "",
+            "datasource": {
+              "type": "influxdb",
+              "uid": "${DS_INFLUXDB}"
+            }
+          }
+        ]
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    }
+  },
+  "overwrite": true,
+  "inputs": [
+    {
+      "name": "DS_INFLUXDB",
+      "label": "InfluxDB datasource",
+      "type": "datasource",
+      "pluginId": "influxdb",
+      "value": ""
+    }
+  ]
+}

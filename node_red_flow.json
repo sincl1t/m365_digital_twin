@@ -1,0 +1,147 @@
+[
+  {
+    "id": "flow-m365-lis-01",
+    "label": "M365 Lis — Telemetry Ingest",
+    "nodes": [
+      {
+        "id": "mqtt-in-telemetry",
+        "type": "mqtt in",
+        "z": "flow-m365-lis-01",
+        "name": "MQTT Telemetry",
+        "topic": "scooter/+/telemetry",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "mqtt-broker-1",
+        "nl": false,
+        "rap": false,
+        "rh": 0,
+        "x": 160,
+        "y": 100,
+        "wires": [
+          [
+            "json-parse"
+          ]
+        ]
+      },
+      {
+        "id": "json-parse",
+        "type": "json",
+        "z": "flow-m365-lis-01",
+        "name": "JSON parse",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 370,
+        "y": 100,
+        "wires": [
+          [
+            "validator-fn"
+          ]
+        ]
+      },
+      {
+        "id": "validator-fn",
+        "type": "function",
+        "z": "flow-m365-lis-01",
+        "name": "Validate & Clamp",
+        "func": "\n// Validate ranges and clamp values; add quality flags; compute power\nfunction clamp(v, lo, hi) {\n  if (v === undefined || v === null || isNaN(v)) return null;\n  if (v < lo) { v = lo; }\n  if (v > hi) { v = hi; }\n  return v;\n}\nlet p = msg.payload || {};\np.u_batt_v = clamp(Number(p.u_batt_v), 30, 42);\np.i_batt_a = clamp(Number(p.i_batt_a), -25, 25);\np.t_batt_c = clamp(Number(p.t_batt_c), -20, 70);\np.t_ctrl_c = clamp(Number(p.t_ctrl_c), -20, 90);\np.speed_kmh = clamp(Number(p.speed_kmh), 0, 35);\n['ax_ms2','ay_ms2','az_ms2'].forEach(k=>{ if (p[k]!==undefined) p[k]=Number(p[k]); });\nif (p.u_batt_v!==null && p.i_batt_a!==null) { p.pwr_w = Number((p.u_batt_v * p.i_batt_a).toFixed(2)); }\n\n// ISO timestamp\nif (!p.ts) { p.ts = new Date().toISOString(); }\n\n// Save back\nmsg.payload = p;\n\n// Build Influx line protocol string\n// measurement scooter, tags: device_id, fw_src\nlet dev = (p.device_id || msg.topic.split('/')[1] || 'm365-lis-01');\nlet src = (p.fw_src || 'ble');\nfunction fkv(k,v){ return `${k}=${(typeof v==='number')?v:JSON.stringify(String(v))}`; }\nlet fields = [];\n['u_batt_v','i_batt_a','t_batt_c','t_ctrl_c','speed_kmh','ax_ms2','ay_ms2','az_ms2','lat','lon','pwr_w'].forEach(k=>{\n  if (p[k]!==null && p[k]!==undefined) fields.push(fkv(k,p[k]));\n});\nmsg.influx = `scooter,device_id=${dev},fw_src=${src} ${fields.join(',')} ${Date.parse(p.ts)*1000000}`;\nreturn [msg, {payload: msg.influx}, msg];\n",
+        "outputs": 3,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 590,
+        "y": 100,
+        "wires": [
+          [
+            "influx-out"
+          ],
+          [
+            "debug-lp"
+          ],
+          [
+            "debug-json"
+          ]
+        ]
+      },
+      {
+        "id": "influx-out",
+        "type": "influxdb out",
+        "z": "flow-m365-lis-01",
+        "influxdb": "influxdb-1",
+        "name": "InfluxDB v1/v2 (configured by you)",
+        "measurement": "scooter",
+        "precision": "",
+        "retentionPolicy": "",
+        "x": 880,
+        "y": 80,
+        "wires": []
+      },
+      {
+        "id": "debug-json",
+        "type": "debug",
+        "z": "flow-m365-lis-01",
+        "name": "Debug JSON",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 880,
+        "y": 120,
+        "wires": []
+      },
+      {
+        "id": "debug-lp",
+        "type": "debug",
+        "z": "flow-m365-lis-01",
+        "name": "Debug Influx Line",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "influx",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 900,
+        "y": 160,
+        "wires": []
+      },
+      {
+        "id": "mqtt-broker-1",
+        "type": "mqtt-broker",
+        "name": "Your Mosquitto",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "nodered-m365",
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closePayload": "",
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "credentials": {}
+      },
+      {
+        "id": "influxdb-1",
+        "type": "influxdb",
+        "hostname": "localhost",
+        "port": "8086",
+        "protocol": "http",
+        "database": "telegraf",
+        "name": "Your InfluxDB",
+        "usetls": false
+      }
+    ]
+  }
+]
