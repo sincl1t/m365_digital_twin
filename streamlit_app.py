@@ -1,244 +1,388 @@
+# streamlit_app.py
+
 import os
 import time
 import json
-import pathlib
-import math
+import threading
+import queue
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
-import streamlit as st
 import pandas as pd
-
-# Optional: Plotly for interactive charts
-import plotly.express as px
+import streamlit as st
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 
-# Try to import InfluxDB client if available
-INFLUX_OK = True
+# ===== Optional deps =====
 try:
-    from influxdb_client import InfluxDBClient, Point
-    from influxdb_client.client.write_api import SYNCHRONOUS
+    from influxdb_client import InfluxDBClient
+    INFLUX_OK = True
 except Exception:
     INFLUX_OK = False
 
-st.set_page_config(page_title="M365 Digital Twin Dashboard", layout="wide")
+try:
+    import paho.mqtt.client as mqtt
+    MQTT_OK = True
+except Exception:
+    MQTT_OK = False
 
-# --------------------------------------
-# Helpers
-# --------------------------------------
-def parse_iso(ts):
+
+# ---------- helpers ----------
+def parse_iso(s):
+    if not s:
+        return None
+    if isinstance(s, (int, float)):
+        # unix ms or s
+        try:
+            if float(s) > 2_000_000_000_000:
+                return datetime.fromtimestamp(float(s) / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(float(s), tz=timezone.utc)
+        except Exception:
+            return None
     try:
-        if ts.endswith("Z"):
-            return datetime.fromisoformat(ts.replace("Z","+00:00"))
-        return datetime.fromisoformat(ts)
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except Exception:
         return None
 
-def soc_from_voltage(u_v: float) -> float:
-    # Crude linear approximation for 10s Li-ion pack (42.0 V full, 33.0 V empty)
-    if u_v is None: 
-        return None
-    soc = (u_v - 33.0) / (42.0 - 33.0)
-    return float(max(0.0, min(1.0, soc)))
 
-def estimate_range_km(soc: float, nominal_km: float = 30.0) -> float:
-    if soc is None:
+def soc_from_voltage(u_v):
+    if u_v is None or pd.isna(u_v):
         return None
-    return float(max(0.0, nominal_km * soc))
+    pts = [
+        (30.5, 0.00),
+        (33.0, 0.10),
+        (36.0, 0.40),
+        (39.0, 0.70),
+        (41.0, 0.90),
+        (42.0, 1.00),
+    ]
+    if u_v <= pts[0][0]:
+        return pts[0][1]
+    if u_v >= pts[-1][0]:
+        return pts[-1][1]
+    for (x1, y1), (x2, y2) in zip(pts[:-1], pts[1:]):
+        if x1 <= u_v <= x2:
+            t = (u_v - x1) / (x2 - x1)
+            return y1 + t * (y2 - y1)
+    return None
 
-def load_jsonl(path: str) -> pd.DataFrame:
-    rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
+
+def estimate_range_km(soc, max_range_km=30.0):
+    if soc is None or pd.isna(soc):
+        return None
+    return float(soc) * float(max_range_km)
+
+
+def make_line(df, col, title, unit=""):
+    fig = go.Figure()
+    if col in df.columns and "ts" in df.columns:
+        d = df[["ts", col]].dropna()
+        if not d.empty:
+            fig.add_trace(go.Scatter(x=d["ts"], y=d[col], mode="lines", name=col))
+    fig.update_layout(
+        title=title,
+        xaxis_title="time",
+        yaxis_title=unit,
+        height=260,
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    return fig
+
+
+# ---------- Demo loader ----------
+@st.cache_data(ttl=60)
+def load_jsonl(path):
+    try:
+        rows = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "marker" in obj:
-                # marker row
-                rows.append({
-                    "ts": parse_iso(obj.get("ts")),
-                    "marker": obj.get("marker")
-                })
-            else:
-                rows.append({
-                    "ts": parse_iso(obj.get("ts")),
-                    "u_batt_v": obj.get("u_batt_v"),
-                    "i_batt_a": obj.get("i_batt_a"),
-                    "t_batt_c": obj.get("t_batt_c"),
-                    "t_ctrl_c": obj.get("t_ctrl_c"),
-                    "speed_kmh": obj.get("speed_kmh"),
-                    "ax_ms2": obj.get("ax_ms2"),
-                    "ay_ms2": obj.get("ay_ms2"),
-                    "az_ms2": obj.get("az_ms2"),
-                    "fw_src": obj.get("fw_src","synthetic"),
-                })
-    df = pd.DataFrame(rows)
-    df = df.sort_values("ts")
-    return df
-
-def query_influx(url, token, org, bucket, measurement="scooter", device_id="m365-lis-01", minutes=30):
-    if not INFLUX_OK:
-        st.warning("InfluxDB client не установлен. Установи пакет influxdb-client, чтобы использовать Live-режим.")
-        return pd.DataFrame()
-    client = InfluxDBClient(url=url, token=token, org=org, timeout=30_000)
-    query_api = client.query_api()
-    start = f"-{minutes}m"
-    flux = f'''
-from(bucket:"{bucket}")
-  |> range(start: {start})
-  |> filter(fn: (r) => r["_measurement"] == "{measurement}")
-  |> filter(fn: (r) => r["device_id"] == "{device_id}")
-  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> keep(columns: ["_time","u_batt_v","i_batt_a","t_batt_c","t_ctrl_c","speed_kmh","ax_ms2","ay_ms2","az_ms2","fw_src"])
-'''
-    tables = query_api.query_data_frame(flux)
-    if isinstance(tables, list) and len(tables)==0:
-        return pd.DataFrame()
-    if isinstance(tables, list):
-        df = pd.concat(tables, ignore_index=True)
-    else:
-        df = tables
-    if df.empty:
+                obj["ts"] = parse_iso(obj.get("ts")) or datetime.now(timezone.utc)
+                rows.append(obj)
+        df = pd.DataFrame(rows)
+        if "ts" in df:
+            df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+            df = df.sort_values("ts")
         return df
-    if "_time" in df.columns:
-        df.rename(columns={"_time":"ts"}, inplace=True)
-    df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    df = df.sort_values("ts")
+    except Exception as e:
+        st.error(f"JSONL error: {e}")
+        return pd.DataFrame()
+
+
+# ---------- Influx ----------
+@st.cache_data(ttl=30)
+def from_influx(url, token, org, bucket, device, window_min):
+    if not INFLUX_OK:
+        st.error("influxdb-client не установлен.")
+        return pd.DataFrame()
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=int(window_min))
+    start = t0.isoformat()
+
+    try:
+        client = InfluxDBClient(url=url, token=token, org=org)
+        qapi = client.query_api()
+        flux = f'''
+from(bucket: "{bucket}")
+  |> range(start: {start})
+  |> filter(fn: (r) => r._measurement == "scooter")
+  |> filter(fn: (r) => r.device_id == "{device}")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> keep(columns: ["_time","u_batt_v","i_batt_a","t_batt_c","t_ctrl_c","speed_kmh","ax_ms2","ay_ms2","az_ms2"])
+'''
+        tables = qapi.query_data_frame(flux)
+        if isinstance(tables, list):
+            df = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+        else:
+            df = tables
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = df.rename(columns={"_time": "ts"})
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+        df = df.sort_values("ts")
+        return df
+    except Exception as e:
+        st.error(f"Influx error: {e}")
+        return pd.DataFrame()
+
+
+# ---------- MQTT ----------
+def start_mqtt_reader(host, port, topic, ignore_synthetic=True):
+    q = queue.Queue(maxsize=5000)
+
+    def on_message(_c, _u, msg):
+        try:
+            payload = msg.payload.decode("utf-8", errors="ignore")
+            raw = json.loads(payload)
+
+            # Optional: ignore synthetic emulator stream in LIVE mode
+            if ignore_synthetic and raw.get("fw_src") == "synthetic":
+                return
+
+            # Accept both:
+            # 1) "scooter" schema (emulator / Node-RED / Influx-style)
+            # 2) ESP8266 schema: throttle_raw, motor{state,pwm}, wifi{rssi}, temp_c, hall{pulses,delta}
+            ts = parse_iso(raw.get("ts")) or datetime.now(timezone.utc)
+
+            if ("throttle_raw" in raw) or ("motor" in raw) or ("wifi" in raw) or ("hall" in raw):
+                motor = raw.get("motor") or {}
+                wifi = raw.get("wifi") or {}
+                hall = raw.get("hall") or {}
+
+                obj = {
+                    "ts": ts,
+
+                    # Classic scooter fields (may be None until real sensors are connected)
+                    "u_batt_v": raw.get("u_batt_v"),
+                    "i_batt_a": raw.get("i_batt_a"),
+                    "t_batt_c": raw.get("t_batt_c", raw.get("temp_c")),
+                    "t_ctrl_c": raw.get("t_ctrl_c"),
+
+                    # Speed proxy: hall delta -> km/h (placeholder scaling; tune later)
+                    "speed_kmh": raw.get("speed_kmh"),
+                    "ax_ms2": raw.get("ax_ms2"),
+                    "ay_ms2": raw.get("ay_ms2"),
+                    "az_ms2": raw.get("az_ms2"),
+
+                    # Extra ESP fields
+                    "throttle_raw": raw.get("throttle_raw"),
+                    "motor_state": motor.get("state"),
+                    "motor_pwm": motor.get("pwm"),
+                    "rssi": wifi.get("rssi"),
+                    "hall_pulses": hall.get("pulses"),
+                    "hall_delta": hall.get("delta"),
+                    "fw_src": "esp8266",
+                }
+
+                if obj["speed_kmh"] is None:
+                    try:
+                        obj["speed_kmh"] = float(obj["hall_delta"] or 0.0) * 0.1
+                    except Exception:
+                        obj["speed_kmh"] = 0.0
+            else:
+                # Already in scooter schema
+                obj = raw
+                obj["ts"] = ts
+                if "fw_src" not in obj:
+                    obj["fw_src"] = "unknown"
+
+            try:
+                q.put_nowait(obj)
+            except queue.Full:
+                # Drop oldest-like behavior: if queue is full, drop this message silently
+                pass
+
+        except Exception as e:
+            print("MQTT parse error:", e)
+
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+    )
+    client.on_message = on_message
+    print(f"Attempting MQTT connection to {host}:{port}")
+    client.connect(host, int(port), keepalive=30)
+    client.subscribe(topic, qos=0)
+    print(f"MQTT connected to {host}:{port}, subscribing to {topic}")
+
+    th = threading.Thread(target=client.loop_forever, daemon=True)
+    th.start()
+    return q
+
+
+def df_from_queue(q, window_min):
+    """
+    IMPORTANT FIX:
+    - We keep a rolling buffer in st.session_state so the dashboard doesn't show
+      "No data" on cycles where no new MQTT messages arrived.
+    """
+    if "mqtt_buf" not in st.session_state:
+        st.session_state["mqtt_buf"] = deque(maxlen=10000)
+
+    buf = st.session_state["mqtt_buf"]
+
+    # Pull everything available now (short timeouts so UI is not blocked)
+    while True:
+        try:
+            obj = q.get(timeout=0.05)
+            buf.append(obj)
+        except queue.Empty:
+            break
+
+    if not buf:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(list(buf))
+    if "ts" in df:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+        t_deadline = datetime.now(timezone.utc) - timedelta(minutes=int(window_min))
+        df = df[df["ts"] >= t_deadline].sort_values("ts")
     return df
 
-# --------------------------------------
-# Sidebar
-# --------------------------------------
+
+def get_mqtt_queue(host, port, topic, ignore_synth):
+    key = f"{host}:{port}:{topic}:ignore_synth={int(bool(ignore_synth))}"
+
+    # If config changed -> restart reader + reset rolling buffer
+    if st.session_state.get("mqtt_cfg") != key or "mqtt_q" not in st.session_state:
+        st.session_state["mqtt_cfg"] = key
+        st.session_state["mqtt_q"] = start_mqtt_reader(host, port, topic, ignore_synthetic=ignore_synth)
+        st.session_state["mqtt_buf"] = deque(maxlen=10000)
+
+    return st.session_state["mqtt_q"]
+
+
+# ---------- UI ----------
+st.title("M365 Digital Twin Dashboard")
+
 st.sidebar.header("Настройки")
-mode = st.sidebar.radio("Режим работы", ["Demo (JSONL)", "Live (InfluxDB)"])
+mode = st.sidebar.radio("Режим работы", ["Demo (JSONL)", "Live (InfluxDB)", "Live (MQTT)"])
+refresh_sec = st.sidebar.slider("Период автообновления (сек.)", 1, 30, 5)
+window_min = st.sidebar.slider("Окно данных (мин.)", 1, 120, 15)
 
 if mode == "Demo (JSONL)":
-    default_path = "logs/raw/2025-09-26_m365_synthetic.jsonl"
-    path = st.sidebar.text_input("Путь к JSONL", value=default_path)
+    path = st.sidebar.text_input("Путь к JSONL", value="logs/raw/2025-09-26_m365_synthetic.jsonl")
+
+elif mode == "Live (InfluxDB)":
+    url = st.sidebar.text_input("Influx URL", "http://localhost:8086")
+    token = st.sidebar.text_input("Token", "", type="password")
+    org = st.sidebar.text_input("Org", "my-org")
+    bucket = st.sidebar.text_input("Bucket", "scooter")
+    device = st.sidebar.text_input("Device ID", "m365-lis-01")
+
 else:
-    url = st.sidebar.text_input("Influx URL", value=os.getenv("INFLUX_URL","http://localhost:8086"))
-    token = st.sidebar.text_input("Influx Token", value=os.getenv("INFLUX_TOKEN",""), type="password")
-    org = st.sidebar.text_input("Influx Org", value=os.getenv("INFLUX_ORG","my-org"))
-    bucket = st.sidebar.text_input("Influx Bucket", value=os.getenv("INFLUX_BUCKET","scooter"))
-    device = st.sidebar.text_input("Device ID", value="m365-lis-01")
-refresh_sec = st.sidebar.slider("Обновление (сек.)", min_value=2, max_value=30, value=5, step=1)
-window_min = st.sidebar.slider("Окно, минут", min_value=5, max_value=120, value=30, step=5)
+    mqtt_host = st.sidebar.text_input("MQTT host", "localhost")
+    mqtt_port = st.sidebar.number_input("MQTT port", 1, 65535, 1883)
+    mqtt_topic = st.sidebar.text_input("Topic filter", "m365/#")
 
-st.sidebar.markdown("---")
-st.sidebar.caption("M365 Digital Twin • Streamlit Dashboard")
+    # Optional: ignore synthetic stream when you're watching ESP
+    ignore_synth = st.sidebar.checkbox("Игнорировать synthetic (эмулятор)", value=True)
 
-# --------------------------------------
-# Data load
-# --------------------------------------
-@st.cache_data(ttl=5)
-def get_demo_df(path, window_min):
+# Autorefresh only in Live modes
+if mode.startswith("Live"):
+    st_autorefresh(interval=refresh_sec * 1000, key="live_autorefresh")
+
+    # Clear cache ONLY for Influx (MQTT isn't cached and shouldn't be cleared)
+    if mode == "Live (InfluxDB)":
+        st.cache_data.clear()
+
+# ---------- Data source ----------
+if mode == "Demo (JSONL)":
     df = load_jsonl(path)
-    if df.empty:
-        return df
-    tmax = df["ts"].max()
-    tmin = tmax - timedelta(minutes=window_min)
-    return df[df["ts"].between(tmin, tmax)]
 
-@st.cache_data(ttl=5)
-def get_live_df(url, token, org, bucket, device, window_min):
-    df = query_influx(url, token, org, bucket, device_id=device, minutes=window_min)
-    return df
+elif mode == "Live (InfluxDB)":
+    df = from_influx(url, token, org, bucket, device, window_min)
 
-placeholder = st.empty()
+else:
+    if not MQTT_OK:
+        st.error("paho-mqtt не установлен.")
+        st.stop()
+    q = get_mqtt_queue(mqtt_host, mqtt_port, mqtt_topic, ignore_synth)
+    df = df_from_queue(q, window_min)
 
-def render(df):
-    if df is None or df.empty:
-        st.warning("Нет данных для отображения.")
-        return
+# ---------- Empty handling ----------
+if df is None or df.empty:
+    st.info("Нет данных для отображения. Проверь источник и фильтры.")
+    st.stop()
 
-    latest = df.dropna(subset=["u_batt_v","i_batt_a","speed_kmh","t_batt_c","t_ctrl_c"]).iloc[-1] if not df.dropna().empty else None
-    u = float(latest["u_batt_v"]) if latest is not None else None
-    i = float(latest["i_batt_a"]) if latest is not None else None
-    v_kmh = float(latest["speed_kmh"]) if latest is not None else None
-    t_b = float(latest["t_batt_c"]) if latest is not None else None
-    t_c = float(latest["t_ctrl_c"]) if latest is not None else None
-    soc = soc_from_voltage(u) if u is not None else None
-    rng = estimate_range_km(soc) if soc is not None else None
-    pwr = (u*i) if (u is not None and i is not None) else None
+# ---------- metrics ----------
+# Ensure the expected columns exist (so the dashboard doesn't crash on partial schemas)
+for col in ["u_batt_v", "i_batt_a", "t_batt_c", "t_ctrl_c", "speed_kmh", "ax_ms2", "ay_ms2", "az_ms2"]:
+    if col not in df.columns:
+        df[col] = None
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("U батареи (В)", f"{u:.2f}" if u is not None else "—")
-    c2.metric("I батареи (А)", f"{i:.2f}" if i is not None else "—")
-    c3.metric("Мощность (Вт)", f"{pwr:.0f}" if pwr is not None else "—")
-    c4.metric("Скорость (км/ч)", f"{v_kmh:.1f}" if v_kmh is not None else "—")
-    c5.metric("SOC (оценка)", f"{soc*100:,.0f}%" if soc is not None else "—")
-    c6.metric("Запас хода (км)", f"{rng:.1f}" if rng is not None else "—")
+df["soc"] = df["u_batt_v"].apply(soc_from_voltage)
+df["range_km"] = df["soc"].apply(lambda s: estimate_range_km(s, 30.0))
 
-    # Charts
-    with st.container():
-        left, right = st.columns(2)
-        with left:
-            fig = go.Figure()
-            if "u_batt_v" in df.columns:
-                fig.add_trace(go.Scatter(x=df["ts"], y=df["u_batt_v"], mode="lines", name="U_batt (V)"))
-            if "i_batt_a" in df.columns:
-                fig.add_trace(go.Scatter(x=df["ts"], y=df["i_batt_a"], mode="lines", name="I_batt (A)", yaxis="y2"))
-            fig.update_layout(
-                title="Напряжение и ток",
-                xaxis_title="Время",
-                yaxis_title="Вольты",
-                yaxis2=dict(title="Амперы", overlaying="y", side="right", showgrid=False),
-                height=350,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+last = df.tail(1).iloc[0]
 
-            fig2 = go.Figure()
-            if "t_batt_c" in df.columns:
-                fig2.add_trace(go.Scatter(x=df["ts"], y=df["t_batt_c"], mode="lines", name="T_batt (°C)"))
-            if "t_ctrl_c" in df.columns:
-                fig2.add_trace(go.Scatter(x=df["ts"], y=df["t_ctrl_c"], mode="lines", name="T_ctrl (°C)"))
-            fig2.update_layout(title="Температуры", xaxis_title="Время", yaxis_title="°C", height=350)
-            st.plotly_chart(fig2, use_container_width=True)
-        with right:
-            if "speed_kmh" in df.columns:
-                fig3 = px.area(df, x="ts", y="speed_kmh", title="Скорость (км/ч)")
-                st.plotly_chart(fig3, use_container_width=True)
-            if "u_batt_v" in df.columns and "i_batt_a" in df.columns:
-                dfp = df.copy()
-                dfp["pwr_w"] = dfp["u_batt_v"] * dfp["i_batt_a"]
-                fig4 = px.area(dfp, x="ts", y="pwr_w", title="Мощность (Вт)")
-                st.plotly_chart(fig4, use_container_width=True)
 
-    # Raw preview
-    with st.expander("Показать сырые данные"):
-        st.dataframe(df.tail(200), use_container_width=True)
+def fmt_num(v, d=2):
+    import math
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "—"
+    return f"{float(v):.{d}f}"
 
-# --------------------------------------
-# Main loop (manual refresh)
-# --------------------------------------
-tab1, tab2 = st.tabs(["Дэшборд", "Справка"])
 
-with tab1:
-    if mode == "Demo (JSONL)":
-        df = get_demo_df(path, window_min)
-    else:
-        df = get_live_df(url, token, org, bucket, device, window_min)
-    render(df)
-    st.caption("Ручное обновление: нажми кнопку ниже.")
-    if st.button("Обновить данные"):
-        st.rerun()
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("U batt (V)", fmt_num(last.get("u_batt_v")))
+col2.metric("I batt (A)", fmt_num(last.get("i_batt_a")))
+col3.metric("Speed (km/h)", fmt_num(last.get("speed_kmh")))
+col4.metric("T batt (°C)", fmt_num(last.get("t_batt_c")))
+col5.metric("SOC", fmt_num(last.get("soc"), 2))
 
-with tab2:
-    st.markdown('''
-**M365 Digital Twin Dashboard** — локальное приложение для наглядного мониторинга телеметрии самоката Xiaomi M365.
+# Extra ESP-only fields (shown when present)
+extra_cols = ["throttle_raw", "motor_state", "motor_pwm", "rssi", "hall_pulses", "hall_delta", "fw_src"]
+have_extra = any(c in df.columns and df[c].notna().any() for c in extra_cols)
+if have_extra:
+    st.markdown("### ESP / MQTT поля")
+    e1, e2, e3, e4, e5, e6 = st.columns(6)
+    e1.metric("Throttle raw", str(last.get("throttle_raw", "—")))
+    e2.metric("Motor state", str(last.get("motor_state", "—")))
+    e3.metric("Motor pwm", str(last.get("motor_pwm", "—")))
+    e4.metric("RSSI", str(last.get("rssi", "—")))
+    e5.metric("Hall Δ", str(last.get("hall_delta", "—")))
+    e6.metric("FW src", str(last.get("fw_src", "—")))
+else:
+    # Still show fw_src if present in scooter schema
+    if "fw_src" in df.columns and df["fw_src"].notna().any():
+        st.caption(f"FW src: {last.get('fw_src')}")
 
-**Режимы:**
-- *Demo (JSONL)* — читает файл `jsonl` из папки `logs/raw`, подходит для демонстрации.
-- *Live (InfluxDB)* — тянет последние N минут из InfluxDB.
+# ---------- charts ----------
+c1, c2 = st.columns(2)
+c1.plotly_chart(make_line(df, "u_batt_v", "Battery Voltage", "V"), use_container_width=True)
+c2.plotly_chart(make_line(df, "i_batt_a", "Battery Current", "A"), use_container_width=True)
 
-**Метрики:**
-- SOC рассчитывается по грубой линейной аппроксимации напряжения (42.0V → 100%, 33.0V → 0%). На этапах 4–5 можно заменить на кулон-каунтинг + OCV.
-- Запас хода оценивается как SOC × 30 км (номинальный пробег M365).
+c3, c4 = st.columns(2)
+c3.plotly_chart(make_line(df, "speed_kmh", "Speed", "km/h"), use_container_width=True)
+c4.plotly_chart(make_line(df, "t_batt_c", "Battery Temp", "°C"), use_container_width=True)
 
-Источник проекта: учебный прототип ЦД.
-''')
+st.plotly_chart(make_line(df, "t_ctrl_c", "Controller Temp", "°C"), use_container_width=True)
+st.plotly_chart(make_line(df, "soc", "SOC (0..1)"), use_container_width=True)
 
-# Auto-refresh disabled to prevent blinking; use manual button instead
+st.markdown("### Последние сообщения")
+st.dataframe(df.tail(50), use_container_width=True)

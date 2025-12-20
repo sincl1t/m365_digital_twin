@@ -1,103 +1,207 @@
 {
-  "dashboard": {
-    "id": null,
-    "uid": null,
-    "title": "M365 — Telemetry",
-    "timezone": "browser",
-    "panels": [
-      {
-        "type": "stat",
-        "title": "SOC (estimate)",
-        "gridPos": {
-          "h": 6,
-          "w": 6,
-          "x": 0,
-          "y": 0
-        },
-        "targets": [
-          {
-            "query": "integral(mean(\"i_batt_a\"))",
-            "datasource": {
-              "type": "influxdb",
-              "uid": "${DS_INFLUXDB}"
-            }
-          }
-        ]
-      },
-      {
-        "type": "timeseries",
-        "title": "Battery Voltage / Current",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 6,
-          "y": 0
-        },
-        "targets": [
-          {
-            "query": "from(bucket:\"scooter\") |> range(start: -1h)",
-            "datasource": {
-              "type": "influxdb",
-              "uid": "${DS_INFLUXDB}"
-            }
-          }
-        ]
-      },
-      {
-        "type": "timeseries",
-        "title": "Temperatures (Batt / Ctrl)",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 0,
-          "y": 6
-        },
-        "targets": [
-          {
-            "query": "",
-            "datasource": {
-              "type": "influxdb",
-              "uid": "${DS_INFLUXDB}"
-            }
-          }
-        ]
-      },
-      {
-        "type": "timeseries",
-        "title": "Speed & Power",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 12,
-          "y": 6
-        },
-        "targets": [
-          {
-            "query": "",
-            "datasource": {
-              "type": "influxdb",
-              "uid": "${DS_INFLUXDB}"
-            }
-          }
-        ]
-      }
-    ],
-    "templating": {
-      "list": []
-    },
-    "time": {
-      "from": "now-1h",
-      "to": "now"
-    }
-  },
-  "overwrite": true,
-  "inputs": [
+  "id": null,
+  "title": "M365 Digital Twin",
+  "uid": "m365_dashboard",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
     {
-      "name": "DS_INFLUXDB",
-      "label": "InfluxDB datasource",
-      "type": "datasource",
-      "pluginId": "influxdb",
-      "value": ""
+      "id": 1,
+      "type": "timeseries",
+      "title": "Напряжение и ток батареи",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "volt"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "i_batt_a" },
+            "properties": [
+              { "id": "unit", "value": "amp" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -30m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and (r._field == \"u_batt_v\" or r._field == \"i_batt_a\"))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "showLegend": true },
+        "tooltip": { "mode": "single" }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Температуры батареи и контроллера",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "celsius"
+        }
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -30m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and (r._field == \"t_batt_c\" or r._field == \"t_ctrl_c\"))",
+          "refId": "B"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "options": {
+        "legend": { "showLegend": true },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Скорость",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "kilometers-per-hour"
+        }
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -30m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and r._field == \"speed_kmh\")",
+          "refId": "C"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "options": {
+        "legend": { "showLegend": true },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Мощность (Вт)",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "watt"
+        }
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -30m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and (r._field == \"u_batt_v\" or r._field == \"i_batt_a\")) |> pivot(rowKey:[\"_time\"], columnKey:[\"_field\"], valueColumn:\"_value\") |> map(fn: (r) => ({ r with _value: r.u_batt_v * r.i_batt_a }))",
+          "refId": "D"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "options": {
+        "legend": { "showLegend": false },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Ускорения (MPU6050)",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "m/s²"
+        }
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -30m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and (r._field == \"ax_ms2\" or r._field == \"ay_ms2\" or r._field == \"az_ms2\"))",
+          "refId": "E"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 14 },
+      "options": {
+        "legend": { "showLegend": true },
+        "tooltip": { "mode": "single" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "SOC (State of Charge)",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "orange", "value": 20 },
+              { "color": "green", "value": 40 }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "targets": [
+        {
+          "query": "from(bucket: \"scooter\") |> range(start: -5m) |> filter(fn: (r) => r._measurement == \"scooter\" and r.device_id == \"m365-lis-01\" and r._field == \"u_batt_v\") |> last() |> map(fn: (r) => ({ r with _value: ((r._value - 33.8) / (42.0 - 33.8)) * 100.0 }))",
+          "refId": "F"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 }
     }
-  ]
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "device_id",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxds"
+        },
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"scooter\", tag: \"device_id\")",
+        "refresh": 2,
+        "hide": 0,
+        "label": "Device ID",
+        "sort": 0,
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"],
+    "time_options": ["5m", "15m", "30m", "1h", "6h", "12h", "24h"]
+  }
 }

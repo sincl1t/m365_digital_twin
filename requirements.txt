@@ -1,5 +1,9 @@
+
+
 streamlit==1.37.1
 pandas>=2.0.0
 plotly>=5.20.0
 influxdb-client>=1.43.0
 python-dotenv>=1.0.1
+paho-mqtt==2.1.0
+streamlit-autorefresh>=1.0.0

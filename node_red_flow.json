@@ -1,147 +1,112 @@
 [
   {
-    "id": "flow-m365-lis-01",
-    "label": "M365 Lis — Telemetry Ingest",
-    "nodes": [
-      {
-        "id": "mqtt-in-telemetry",
-        "type": "mqtt in",
-        "z": "flow-m365-lis-01",
-        "name": "MQTT Telemetry",
-        "topic": "scooter/+/telemetry",
-        "qos": "0",
-        "datatype": "auto",
-        "broker": "mqtt-broker-1",
-        "nl": false,
-        "rap": false,
-        "rh": 0,
-        "x": 160,
-        "y": 100,
-        "wires": [
-          [
-            "json-parse"
-          ]
-        ]
-      },
-      {
-        "id": "json-parse",
-        "type": "json",
-        "z": "flow-m365-lis-01",
-        "name": "JSON parse",
-        "property": "payload",
-        "action": "",
-        "pretty": false,
-        "x": 370,
-        "y": 100,
-        "wires": [
-          [
-            "validator-fn"
-          ]
-        ]
-      },
-      {
-        "id": "validator-fn",
-        "type": "function",
-        "z": "flow-m365-lis-01",
-        "name": "Validate & Clamp",
-        "func": "\n// Validate ranges and clamp values; add quality flags; compute power\nfunction clamp(v, lo, hi) {\n  if (v === undefined || v === null || isNaN(v)) return null;\n  if (v < lo) { v = lo; }\n  if (v > hi) { v = hi; }\n  return v;\n}\nlet p = msg.payload || {};\np.u_batt_v = clamp(Number(p.u_batt_v), 30, 42);\np.i_batt_a = clamp(Number(p.i_batt_a), -25, 25);\np.t_batt_c = clamp(Number(p.t_batt_c), -20, 70);\np.t_ctrl_c = clamp(Number(p.t_ctrl_c), -20, 90);\np.speed_kmh = clamp(Number(p.speed_kmh), 0, 35);\n['ax_ms2','ay_ms2','az_ms2'].forEach(k=>{ if (p[k]!==undefined) p[k]=Number(p[k]); });\nif (p.u_batt_v!==null && p.i_batt_a!==null) { p.pwr_w = Number((p.u_batt_v * p.i_batt_a).toFixed(2)); }\n\n// ISO timestamp\nif (!p.ts) { p.ts = new Date().toISOString(); }\n\n// Save back\nmsg.payload = p;\n\n// Build Influx line protocol string\n// measurement scooter, tags: device_id, fw_src\nlet dev = (p.device_id || msg.topic.split('/')[1] || 'm365-lis-01');\nlet src = (p.fw_src || 'ble');\nfunction fkv(k,v){ return `${k}=${(typeof v==='number')?v:JSON.stringify(String(v))}`; }\nlet fields = [];\n['u_batt_v','i_batt_a','t_batt_c','t_ctrl_c','speed_kmh','ax_ms2','ay_ms2','az_ms2','lat','lon','pwr_w'].forEach(k=>{\n  if (p[k]!==null && p[k]!==undefined) fields.push(fkv(k,p[k]));\n});\nmsg.influx = `scooter,device_id=${dev},fw_src=${src} ${fields.join(',')} ${Date.parse(p.ts)*1000000}`;\nreturn [msg, {payload: msg.influx}, msg];\n",
-        "outputs": 3,
-        "noerr": 0,
-        "initialize": "",
-        "finalize": "",
-        "libs": [],
-        "x": 590,
-        "y": 100,
-        "wires": [
-          [
-            "influx-out"
-          ],
-          [
-            "debug-lp"
-          ],
-          [
-            "debug-json"
-          ]
-        ]
-      },
-      {
-        "id": "influx-out",
-        "type": "influxdb out",
-        "z": "flow-m365-lis-01",
-        "influxdb": "influxdb-1",
-        "name": "InfluxDB v1/v2 (configured by you)",
-        "measurement": "scooter",
-        "precision": "",
-        "retentionPolicy": "",
-        "x": 880,
-        "y": 80,
-        "wires": []
-      },
-      {
-        "id": "debug-json",
-        "type": "debug",
-        "z": "flow-m365-lis-01",
-        "name": "Debug JSON",
-        "active": true,
-        "tosidebar": true,
-        "console": false,
-        "tostatus": false,
-        "complete": "payload",
-        "targetType": "msg",
-        "statusVal": "",
-        "statusType": "auto",
-        "x": 880,
-        "y": 120,
-        "wires": []
-      },
-      {
-        "id": "debug-lp",
-        "type": "debug",
-        "z": "flow-m365-lis-01",
-        "name": "Debug Influx Line",
-        "active": false,
-        "tosidebar": true,
-        "console": false,
-        "tostatus": false,
-        "complete": "influx",
-        "targetType": "msg",
-        "statusVal": "",
-        "statusType": "auto",
-        "x": 900,
-        "y": 160,
-        "wires": []
-      },
-      {
-        "id": "mqtt-broker-1",
-        "type": "mqtt-broker",
-        "name": "Your Mosquitto",
-        "broker": "localhost",
-        "port": "1883",
-        "clientid": "nodered-m365",
-        "usetls": false,
-        "protocolVersion": "4",
-        "keepalive": "60",
-        "cleansession": true,
-        "birthTopic": "",
-        "birthQos": "0",
-        "birthPayload": "",
-        "closeTopic": "",
-        "closePayload": "",
-        "willTopic": "",
-        "willQos": "0",
-        "willPayload": "",
-        "credentials": {}
-      },
-      {
-        "id": "influxdb-1",
-        "type": "influxdb",
-        "hostname": "localhost",
-        "port": "8086",
-        "protocol": "http",
-        "database": "telegraf",
-        "name": "Your InfluxDB",
-        "usetls": false
-      }
-    ]
+    "id": "mqtt_in",
+    "type": "mqtt in",
+    "z": "flow1",
+    "name": "MQTT Telemetry In",
+    "topic": "scooter/+/telemetry",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "mqtt_broker_config",
+    "x": 140,
+    "y": 120,
+    "wires": [["json_parse"]]
+  },
+  {
+    "id": "json_parse",
+    "type": "json",
+    "z": "flow1",
+    "name": "Parse JSON",
+    "property": "payload",
+    "action": "",
+    "pretty": false,
+    "x": 340,
+    "y": 120,
+    "wires": [["validator"]]
+  },
+  {
+    "id": "validator",
+    "type": "function",
+    "z": "flow1",
+    "name": "Validate & Prepare",
+    "func": "// Проверка и подготовка данных для InfluxDB\nlet p = msg.payload;\n\n// Обязательные поля\nlet fields = [\"u_batt_v\", \"i_batt_a\", \"t_batt_c\", \"t_ctrl_c\", \"speed_kmh\", \"ax_ms2\", \"ay_ms2\", \"az_ms2\"];\nfor (let f of fields) {\n    if (typeof p[f] === 'undefined') {\n        node.warn(`Field missing: ${f}`);\n        return null;\n    }\n}\n\n// Таймштамп\nlet ts = new Date();\nif (p.ts) {\n    ts = new Date(p.ts);\n}\n\n// device_id берём из MQTT топика\nlet topicParts = msg.topic.split(\"/\");\nlet device_id = topicParts[1] || \"unknown\";\n\n// Формируем объект для InfluxDB\nmsg.payload = [\n    {\n        measurement: \"scooter\",\n        tags: {\n            device_id: device_id,\n            fw_src: p.fw_src || \"unknown\"\n        },\n        fields: {\n            u_batt_v: parseFloat(p.u_batt_v),\n            i_batt_a: parseFloat(p.i_batt_a),\n            t_batt_c: parseFloat(p.t_batt_c),\n            t_ctrl_c: parseFloat(p.t_ctrl_c),\n            speed_kmh: parseFloat(p.speed_kmh),\n            ax_ms2: parseFloat(p.ax_ms2),\n            ay_ms2: parseFloat(p.ay_ms2),\n            az_ms2: parseFloat(p.az_ms2)\n        },\n        timestamp: ts.getTime() * 1000000 // наносекунды\n    }\n];\n\nreturn msg;",
+    "outputs": 1,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 570,
+    "y": 120,
+    "wires": [["influx_out", "debug_log"]]
+  },
+  {
+    "id": "influx_out",
+    "type": "influxdb out",
+    "z": "flow1",
+    "influxdb": "influx_config",
+    "name": "InfluxDB Out",
+    "measurement": "scooter",
+    "precision": "",
+    "retentionPolicy": "",
+    "database": "",
+    "precisionV18Flux": true,
+    "x": 830,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "debug_log",
+    "type": "debug",
+    "z": "flow1",
+    "name": "Debug Output",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 830,
+    "y": 180,
+    "wires": []
+  },
+  {
+    "id": "mqtt_broker_config",
+    "type": "mqtt-broker",
+    "name": "Local Mosquitto",
+    "broker": "127.0.0.1",
+    "port": "1883",
+    "clientid": "node_red_m365",
+    "usetls": false,
+    "compatmode": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": ""
+  },
+  {
+    "id": "influx_config",
+    "type": "influxdb",
+    "hostname": "influxdb",
+    "port": "8086",
+    "protocol": "http",
+    "database": "",
+    "name": "Influx Local",
+    "usetls": false,
+    "tls": "",
+    "influxdbVersion": "2.0",
+    "url": "http://influxdb:8086",
+    "token": "${INFLUXDB_TOKEN}",
+    "org": "${INFLUXDB_ORG}",
+    "bucket": "${INFLUXDB_BUCKET}"
   }
 ]
