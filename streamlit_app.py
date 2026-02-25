@@ -46,20 +46,29 @@ def parse_iso(s):
 
 
 def soc_from_voltage(u_v):
+    """SOC estimate for 12V branch (returns 0..1).
+
+    Piecewise-linear approximation (dashboard-grade). Under load voltage sags,
+    so SOC may fluctuate; apply smoothing if needed.
+    """
     if u_v is None or pd.isna(u_v):
         return None
+
     pts = [
-        (30.5, 0.00),
-        (33.0, 0.10),
-        (36.0, 0.40),
-        (39.0, 0.70),
-        (41.0, 0.90),
-        (42.0, 1.00),
+        (11.00, 0.00),
+        (11.60, 0.10),
+        (11.80, 0.20),
+        (12.00, 0.40),
+        (12.20, 0.70),
+        (12.40, 0.90),
+        (12.60, 1.00),
     ]
+
     if u_v <= pts[0][0]:
         return pts[0][1]
     if u_v >= pts[-1][0]:
         return pts[-1][1]
+
     for (x1, y1), (x2, y2) in zip(pts[:-1], pts[1:]):
         if x1 <= u_v <= x2:
             t = (u_v - x1) / (x2 - x1)
@@ -283,7 +292,15 @@ st.sidebar.header("Настройки")
 mode = st.sidebar.radio("Режим работы", ["Demo (JSONL)", "Live (InfluxDB)", "Live (MQTT)"])
 refresh_sec = st.sidebar.slider("Период автообновления (сек.)", 1, 30, 5)
 window_min = st.sidebar.slider("Окно данных (мин.)", 1, 120, 15)
+speed_med_n = st.sidebar.slider("Медианный фильтр скорости (N)", 1, 15, 5)
+speed_max_kmh = st.sidebar.slider("Speed clamp max (km/h)", 5, 80, 50)
+speed_ema_alpha = st.sidebar.slider("Speed EMA alpha", 0.05, 0.60, 0.25)
 
+
+
+# Zero-lock controls (fast drop to zero when motor stops / no pulses)
+pwm_zero_lock = st.sidebar.slider("PWM zero-lock", 0, 300, 140)
+stop_hold_sec = st.sidebar.slider("Stop hold (sec)", 0.0, 2.0, 0.8)
 if mode == "Demo (JSONL)":
     path = st.sidebar.text_input("Путь к JSONL", value="logs/raw/2025-09-26_m365_synthetic.jsonl")
 
@@ -335,6 +352,52 @@ for col in ["u_batt_v", "i_batt_a", "t_batt_c", "t_ctrl_c", "speed_kmh", "ax_ms2
     if col not in df.columns:
         df[col] = None
 
+# --- Speed filtering (Hall noise tolerant): clamp -> median -> robust outlier reject -> EMA ---
+speed_raw = pd.to_numeric(df["speed_kmh"], errors="coerce")
+
+# A) Physical clamp
+speed_clamped = speed_raw.clip(lower=0, upper=float(speed_max_kmh))
+
+# B) Rolling median
+speed_med = speed_clamped.rolling(window=int(speed_med_n), min_periods=1).median()
+
+# C) Robust outlier rejection (MAD-based, Hampel-like)
+mad = (speed_clamped - speed_med).abs().rolling(window=int(speed_med_n), min_periods=1).median()
+robust_sigma = 1.4826 * mad
+# if sigma is 0 (flat line), avoid marking everything as outlier
+threshold = (4.0 * robust_sigma).where(robust_sigma > 0, other=0.0)
+is_outlier = (speed_clamped - speed_med).abs() > threshold
+
+speed_no_out = speed_clamped.where(~is_outlier, speed_med)
+
+# D) Exponential moving average (instrument-like smoothing)
+df["speed_kmh_filt"] = speed_no_out.ewm(alpha=float(speed_ema_alpha), adjust=False).mean()
+
+
+
+# --- Zero-lock: force speed to 0 quickly when motor is stopped or pulses cease ---
+# Uses available ESP/MQTT fields if present: motor_state, motor_pwm, hall_delta
+if "ts" in df.columns:
+    motor_pwm = pd.to_numeric(df["motor_pwm"], errors="coerce") if "motor_pwm" in df.columns else pd.Series([pd.NA] * len(df))
+    motor_state = df["motor_state"] if "motor_state" in df.columns else pd.Series([pd.NA] * len(df))
+    hall_delta = pd.to_numeric(df["hall_delta"], errors="coerce") if "hall_delta" in df.columns else pd.Series([pd.NA] * len(df))
+
+    is_motor_stop = motor_state.astype(str).str.upper().eq("STOP")
+    is_pwm_low = motor_pwm.notna() & (motor_pwm <= float(pwm_zero_lock))
+
+    # time since last pulse (based on hall_delta == 0)
+    dt = df["ts"].diff().dt.total_seconds().fillna(0.0)
+    no_pulse = hall_delta.fillna(0).astype(float) <= 0.0
+
+    # Accumulate time only while no_pulse holds, reset on any pulse
+    t_since_pulse = (dt.where(no_pulse, 0.0)).groupby((~no_pulse).cumsum()).cumsum()
+    is_no_pulse_long = t_since_pulse >= float(stop_hold_sec)
+
+    force_zero = is_motor_stop | is_pwm_low | is_no_pulse_long
+
+    # Force zero and (optionally) also clamp tiny residuals
+    df.loc[force_zero, "speed_kmh_filt"] = 0.0
+    df["speed_kmh_filt"] = pd.to_numeric(df["speed_kmh_filt"], errors="coerce").fillna(0.0)
 df["soc"] = df["u_batt_v"].apply(soc_from_voltage)
 df["range_km"] = df["soc"].apply(lambda s: estimate_range_km(s, 30.0))
 
@@ -351,7 +414,7 @@ def fmt_num(v, d=2):
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("U batt (V)", fmt_num(last.get("u_batt_v")))
 col2.metric("I batt (A)", fmt_num(last.get("i_batt_a")))
-col3.metric("Speed (km/h)", fmt_num(last.get("speed_kmh")))
+col3.metric("Speed (km/h)", fmt_num(last.get("speed_kmh_filt")))
 col4.metric("T batt (°C)", fmt_num(last.get("t_batt_c")))
 col5.metric("SOC", fmt_num(last.get("soc"), 2))
 
@@ -378,7 +441,7 @@ c1.plotly_chart(make_line(df, "u_batt_v", "Battery Voltage", "V"), use_container
 c2.plotly_chart(make_line(df, "i_batt_a", "Battery Current", "A"), use_container_width=True)
 
 c3, c4 = st.columns(2)
-c3.plotly_chart(make_line(df, "speed_kmh", "Speed", "km/h"), use_container_width=True)
+c3.plotly_chart(make_line(df, "speed_kmh_filt", "Speed", "km/h"), use_container_width=True)
 c4.plotly_chart(make_line(df, "t_batt_c", "Battery Temp", "°C"), use_container_width=True)
 
 st.plotly_chart(make_line(df, "t_ctrl_c", "Controller Temp", "°C"), use_container_width=True)
