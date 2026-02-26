@@ -1,0 +1,4 @@
+
+# Local runtime artifacts
+infra/grafana/grafana.db
+infra/grafana/*.db
