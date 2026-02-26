@@ -97,6 +97,24 @@ def make_line(df, col, title, unit=""):
     )
     return fig
 
+def make_gauge(value, title, vmin, vmax, unit="", thresholds=None):
+    if value is None or pd.isna(value):
+        value = 0
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=float(value),
+        number={'suffix': f" {unit}"},
+        title={'text': title},
+        gauge={
+            'axis': {'range': [vmin, vmax]},
+            'bar': {'thickness': 0.3},
+            'steps': thresholds if thresholds else [],
+        }
+    ))
+
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
+    return fig
 
 # ---------- Demo loader ----------
 @st.cache_data(ttl=60)
@@ -410,13 +428,97 @@ def fmt_num(v, d=2):
         return "—"
     return f"{float(v):.{d}f}"
 
+st.markdown("## Панель приборов")
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("U batt (V)", fmt_num(last.get("u_batt_v")))
-col2.metric("I batt (A)", fmt_num(last.get("i_batt_a")))
-col3.metric("Speed (km/h)", fmt_num(last.get("speed_kmh_filt")))
-col4.metric("T batt (°C)", fmt_num(last.get("t_batt_c")))
-col5.metric("SOC", fmt_num(last.get("soc"), 2))
+g1, g2, g3, g4, g5 = st.columns(5)
+
+# Speed gauge
+g1.plotly_chart(
+    make_gauge(
+        last.get("speed_kmh_filt"),
+        "Speed",
+        0,
+        50,
+        "km/h",
+        thresholds=[
+            {'range': [0, 20], 'color': "lightgreen"},
+            {'range': [20, 35], 'color': "yellow"},
+            {'range': [35, 50], 'color': "red"},
+        ],
+    ),
+    use_container_width=True,
+)
+
+# SOC gauge (convert 0..1 → %)
+soc_percent = (last.get("soc") or 0) * 100
+g2.plotly_chart(
+    make_gauge(
+        soc_percent,
+        "SOC",
+        0,
+        100,
+        "%",
+        thresholds=[
+            {'range': [0, 20], 'color': "red"},
+            {'range': [20, 60], 'color': "yellow"},
+            {'range': [60, 100], 'color': "lightgreen"},
+        ],
+    ),
+    use_container_width=True,
+)
+
+# Voltage gauge
+g3.plotly_chart(
+    make_gauge(
+        last.get("u_batt_v"),
+        "U batt",
+        11,
+        13,
+        "V",
+        thresholds=[
+            {'range': [11, 11.5], 'color': "red"},
+            {'range': [11.5, 12.2], 'color': "yellow"},
+            {'range': [12.2, 13], 'color': "lightgreen"},
+        ],
+    ),
+    use_container_width=True,
+)
+
+# Temperature gauge
+g4.plotly_chart(
+    make_gauge(
+        last.get("t_batt_c"),
+        "T batt",
+        0,
+        80,
+        "°C",
+        thresholds=[
+            {'range': [0, 50], 'color': "lightgreen"},
+            {'range': [50, 65], 'color': "yellow"},
+            {'range': [65, 80], 'color': "red"},
+        ],
+    ),
+    use_container_width=True,
+)
+
+
+# Current gauge
+g5.plotly_chart(
+    make_gauge(
+        last.get("i_batt_a"),
+        "I batt",
+        -5,
+        20,
+        "A",
+        thresholds=[
+            {'range': [-5, 0], 'color': "lightblue"},
+            {'range': [0, 10], 'color': "lightgreen"},
+            {'range': [10, 15], 'color': "yellow"},
+            {'range': [15, 20], 'color': "red"},
+        ],
+    ),
+    use_container_width=True,
+)
 
 # Extra ESP-only fields (shown when present)
 extra_cols = ["throttle_raw", "motor_state", "motor_pwm", "rssi", "hall_pulses", "hall_delta", "fw_src"]
