@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   influxdb:
     image: influxdb:2.7
@@ -22,11 +24,14 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: mosquitto
+    restart: unless-stopped
     ports:
-      - "1884:1883"
-      # - "9001:9001"    # (опц.) websockets
+      - "1884:1883"   # host:container
     volumes:
+      # ВАЖНО: так как compose лежит в папке infra/, путь должен быть относительно infra/
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
 
   nodered:
     image: nodered/node-red:3.1
@@ -35,7 +40,6 @@ services:
       - "1880:1880"
     environment:
       - TZ=Europe/Moscow
-      # Установим нужные пакеты при первом старте
       - NODE_RED_EXTRA_NPM_PACKAGES=node-red-contrib-influxdb
     depends_on:
       influxdb:
@@ -59,3 +63,7 @@ services:
     depends_on:
       influxdb:
         condition: service_healthy
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
