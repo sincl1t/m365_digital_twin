@@ -2,3 +2,9 @@
 # Local runtime artifacts
 infra/grafana/grafana.db
 infra/grafana/*.db
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+logs/

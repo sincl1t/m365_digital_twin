@@ -116,6 +116,242 @@ def make_gauge(value, title, vmin, vmax, unit="", thresholds=None):
     fig.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
     return fig
 
+from PIL import Image
+import numpy as np
+
+def colorize_scooter(img_path, color):
+
+    img = Image.open(img_path).convert("RGBA")
+    data = np.array(img)
+
+    r,g,b = {
+        "green": (0,200,0),
+        "yellow": (240,200,0),
+        "red": (220,0,0)
+    }[color]
+
+    # определяем белый фон
+    white_mask = (data[:,:,0] > 240) & (data[:,:,1] > 240) & (data[:,:,2] > 240)
+
+    # делаем его прозрачным
+    data[white_mask] = [255,255,255,0]
+
+    # перекрашиваем самокат
+    scooter_mask = ~white_mask
+    data[scooter_mask] = [r,g,b,255]
+
+    return Image.fromarray(data)
+
+def scooter_health(last):
+    score = 0
+    issues = []
+
+    t = last.get("t_batt_c")
+    u = last.get("u_batt_v")
+    rssi = last.get("rssi")
+    motor = str(last.get("motor_state", "")).upper()
+
+    if t is not None:
+        if t < 50:
+            score += 1
+        elif t < 65:
+            score += 0.5
+            issues.append("повышенная температура батареи")
+        else:
+            issues.append("критическая температура батареи")
+
+    if u is not None:
+        if u > 12.2:
+            score += 1
+        elif u > 11.5:
+            score += 0.5
+            issues.append("пониженное напряжение батареи")
+        else:
+            issues.append("критически низкое напряжение")
+
+    if rssi is not None:
+        if rssi > -70:
+            score += 1
+        elif rssi > -85:
+            score += 0.5
+            issues.append("слабый сигнал связи")
+        else:
+            issues.append("очень слабый сигнал связи")
+
+    if motor == "STOP":
+        issues.append("мотор остановлен")
+
+    if score >= 2.5:
+        status = "good"
+        color = "green"
+    elif score >= 1.5:
+        status = "warning"
+        color = "yellow"
+    else:
+        status = "bad"
+        color = "red"
+
+    return status, color, issues
+
+def safe_float(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def describe_level(value, good_cond, warn_cond, good_text, warn_text, bad_text):
+    if value is None:
+        return "данные отсутствуют"
+    if good_cond(value):
+        return good_text
+    if warn_cond(value):
+        return warn_text
+    return bad_text
+
+
+def build_detailed_report(df, last):
+    lines = []
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines.append(f"Время анализа: {now_str}")
+
+    speed = safe_float(last.get("speed_kmh_filt"))
+    u_batt = safe_float(last.get("u_batt_v"))
+    i_batt = safe_float(last.get("i_batt_a"))
+    t_batt = safe_float(last.get("t_batt_c"))
+    soc = safe_float((last.get("soc") or 0) * 100)
+    rssi = safe_float(last.get("rssi"))
+    motor_state = str(last.get("motor_state", "—"))
+
+    lines.append("")
+    lines.append("Общая оценка состояния:")
+    if t_batt is not None and t_batt < 50 and (u_batt is not None and u_batt >= 11.5):
+        lines.append("Состояние самоката оценивается как стабильное. Критических отклонений по основным параметрам не выявлено.")
+    elif t_batt is not None and t_batt < 65:
+        lines.append("Состояние самоката в целом работоспособное, однако присутствуют параметры, требующие наблюдения.")
+    else:
+        lines.append("Состояние самоката нестабильное. Обнаружены признаки, указывающие на необходимость диагностики.")
+
+    lines.append("")
+    lines.append("Анализ аккумуляторной системы:")
+    if u_batt is None:
+        lines.append("Напряжение батареи отсутствует в телеметрии, поэтому корректная оценка уровня питания ограничена.")
+    elif u_batt < 11.5:
+        lines.append(f"Напряжение батареи составляет {u_batt:.2f} В, что соответствует пониженному уровню и может указывать на разряд либо некорректность измерительного канала.")
+    elif u_batt < 12.2:
+        lines.append(f"Напряжение батареи составляет {u_batt:.2f} В. Показатель находится в допустимой зоне, но ниже оптимального уровня.")
+    else:
+        lines.append(f"Напряжение батареи составляет {u_batt:.2f} В и находится в нормальном диапазоне.")
+
+    if soc is not None:
+        if soc < 20:
+            lines.append(f"Расчётный уровень заряда оценивается в {soc:.1f} %, что соответствует низкому запасу энергии.")
+        elif soc < 60:
+            lines.append(f"Расчётный уровень заряда оценивается в {soc:.1f} %, что соответствует среднему запасу энергии.")
+        else:
+            lines.append(f"Расчётный уровень заряда оценивается в {soc:.1f} %, что соответствует комфортному запасу энергии.")
+
+    if i_batt is None:
+        lines.append("Данные по току батареи отсутствуют.")
+    else:
+        lines.append(f"Текущий ток батареи составляет {i_batt:.2f} А.")
+
+    if t_batt is None:
+        lines.append("Температура батареи отсутствует в потоке данных.")
+    elif t_batt < 50:
+        lines.append(f"Температура батареи равна {t_batt:.2f} °C и не указывает на тепловую перегрузку.")
+    elif t_batt < 65:
+        lines.append(f"Температура батареи равна {t_batt:.2f} °C. Наблюдается повышенный нагрев, рекомендуется контроль при дальнейшей эксплуатации.")
+    else:
+        lines.append(f"Температура батареи равна {t_batt:.2f} °C и находится в опасной зоне.")
+
+    lines.append("")
+    lines.append("Анализ движения и привода:")
+    if speed is None:
+        lines.append("Скорость не определена.")
+    elif speed <= 0.5:
+        lines.append("В текущий момент самокат находится в состоянии покоя.")
+    elif speed < 15:
+        lines.append(f"Текущая скорость составляет {speed:.2f} км/ч, что соответствует спокойному режиму движения.")
+    elif speed < 30:
+        lines.append(f"Текущая скорость составляет {speed:.2f} км/ч, что соответствует штатному эксплуатационному режиму.")
+    else:
+        lines.append(f"Текущая скорость составляет {speed:.2f} км/ч. Наблюдается повышенная скорость движения.")
+
+    lines.append(f"Состояние мотора: {motor_state}.")
+    if motor_state.upper() == "STOP" and speed is not None and speed <= 0.5:
+        lines.append("Состояние привода согласуется с отсутствием движения.")
+    elif motor_state.upper() == "STOP" and speed is not None and speed > 0.5:
+        lines.append("Обнаружено расхождение: мотор отмечен как STOP, однако скорость ненулевая. Рекомендуется проверить логику телеметрии.")
+    elif motor_state.upper() not in ["—", "NONE", "NAN", ""]:
+        lines.append("Привод передаёт рабочий статус без явных противоречий.")
+
+    lines.append("")
+    lines.append("Анализ связи и качества телеметрии:")
+    if rssi is None:
+        lines.append("Данные по уровню сигнала отсутствуют.")
+    elif rssi > -70:
+        lines.append(f"Уровень сигнала RSSI составляет {rssi:.0f} dBm, качество связи хорошее.")
+    elif rssi > -85:
+        lines.append(f"Уровень сигнала RSSI составляет {rssi:.0f} dBm, связь допустимая, но возможны кратковременные потери устойчивости.")
+    else:
+        lines.append(f"Уровень сигнала RSSI составляет {rssi:.0f} dBm, качество связи низкое.")
+
+    if len(df) >= 5:
+        recent = df.tail(min(20, len(df))).copy()
+
+        vb = pd.to_numeric(recent.get("u_batt_v"), errors="coerce")
+        tb = pd.to_numeric(recent.get("t_batt_c"), errors="coerce")
+        sp = pd.to_numeric(recent.get("speed_kmh_filt"), errors="coerce")
+
+        if vb.notna().sum() >= 3:
+            dv = vb.iloc[-1] - vb.iloc[0]
+            if dv < -0.2:
+                lines.append("За последнее окно наблюдения заметно снижение напряжения батареи.")
+            elif dv > 0.2:
+                lines.append("За последнее окно наблюдения напряжение батареи возросло, что может быть связано с изменением нагрузки или нестабильностью измерения.")
+            else:
+                lines.append("Напряжение батареи в пределах окна наблюдения оставалось относительно стабильным.")
+
+        if tb.notna().sum() >= 3:
+            dt = tb.iloc[-1] - tb.iloc[0]
+            if dt > 1.0:
+                lines.append("Температура батареи демонстрирует выраженную тенденцию к росту.")
+            elif dt > 0.2:
+                lines.append("Температура батареи постепенно увеличивается.")
+            else:
+                lines.append("Температура батареи за окно наблюдения существенно не изменилась.")
+
+        if sp.notna().sum() >= 3:
+            smax = sp.max()
+            if smax <= 0.5:
+                lines.append("В пределах окна наблюдения движение практически отсутствовало.")
+            else:
+                lines.append(f"Максимальная зафиксированная скорость в текущем окне составила {smax:.2f} км/ч.")
+
+    lines.append("")
+    lines.append("Рекомендации:")
+    recs = []
+
+    if u_batt is not None and u_batt < 11.5:
+        recs.append("проверить источник питания, цепь измерения напряжения и фактический уровень заряда")
+    if t_batt is not None and t_batt >= 50:
+        recs.append("проконтролировать температурный режим батареи при дальнейшей работе")
+    if rssi is not None and rssi <= -85:
+        recs.append("улучшить качество беспроводного соединения или уменьшить расстояние до точки доступа")
+    if motor_state.upper() == "STOP" and speed is not None and speed > 0.5:
+        recs.append("проверить согласованность логики расчёта скорости и статуса привода")
+    if not recs:
+        recs.append("продолжить эксплуатацию в штатном режиме и наблюдать параметры в динамике")
+
+    for idx, rec in enumerate(recs, start=1):
+        lines.append(f"{idx}. {rec.capitalize()}.")
+
+    return "\n".join(lines)
+
 # ---------- Demo loader ----------
 @st.cache_data(ttl=60)
 def load_jsonl(path):
@@ -428,126 +664,191 @@ def fmt_num(v, d=2):
         return "—"
     return f"{float(v):.{d}f}"
 
-st.markdown("## Панель приборов")
-
-g1, g2, g3, g4, g5 = st.columns(5)
-
-# Speed gauge
-g1.plotly_chart(
-    make_gauge(
-        last.get("speed_kmh_filt"),
-        "Speed",
-        0,
-        50,
-        "km/h",
-        thresholds=[
-            {'range': [0, 20], 'color': "lightgreen"},
-            {'range': [20, 35], 'color': "yellow"},
-            {'range': [35, 50], 'color': "red"},
-        ],
-    ),
-    use_container_width=True,
-)
-
-# SOC gauge (convert 0..1 → %)
-soc_percent = (last.get("soc") or 0) * 100
-g2.plotly_chart(
-    make_gauge(
-        soc_percent,
-        "SOC",
-        0,
-        100,
-        "%",
-        thresholds=[
-            {'range': [0, 20], 'color': "red"},
-            {'range': [20, 60], 'color': "yellow"},
-            {'range': [60, 100], 'color': "lightgreen"},
-        ],
-    ),
-    use_container_width=True,
-)
-
-# Voltage gauge
-g3.plotly_chart(
-    make_gauge(
-        last.get("u_batt_v"),
-        "U batt",
-        11,
-        13,
-        "V",
-        thresholds=[
-            {'range': [11, 11.5], 'color': "red"},
-            {'range': [11.5, 12.2], 'color': "yellow"},
-            {'range': [12.2, 13], 'color': "lightgreen"},
-        ],
-    ),
-    use_container_width=True,
-)
-
-# Temperature gauge
-g4.plotly_chart(
-    make_gauge(
-        last.get("t_batt_c"),
-        "T batt",
-        0,
-        80,
-        "°C",
-        thresholds=[
-            {'range': [0, 50], 'color': "lightgreen"},
-            {'range': [50, 65], 'color': "yellow"},
-            {'range': [65, 80], 'color': "red"},
-        ],
-    ),
-    use_container_width=True,
-)
+tab1, tab2 = st.tabs(["Панель приборов", "Состояние самоката"])
 
 
-# Current gauge
-g5.plotly_chart(
-    make_gauge(
-        last.get("i_batt_a"),
-        "I batt",
-        -5,
-        20,
-        "A",
-        thresholds=[
-            {'range': [-5, 0], 'color': "lightblue"},
-            {'range': [0, 10], 'color': "lightgreen"},
-            {'range': [10, 15], 'color': "yellow"},
-            {'range': [15, 20], 'color': "red"},
-        ],
-    ),
-    use_container_width=True,
-)
+# ================================
+# ВКЛАДКА 1 — ПАНЕЛЬ ПРИБОРОВ
+# ================================
+with tab1:
 
-# Extra ESP-only fields (shown when present)
-extra_cols = ["throttle_raw", "motor_state", "motor_pwm", "rssi", "hall_pulses", "hall_delta", "fw_src"]
-have_extra = any(c in df.columns and df[c].notna().any() for c in extra_cols)
-if have_extra:
-    st.markdown("### ESP / MQTT поля")
-    e1, e2, e3, e4, e5, e6 = st.columns(6)
-    e1.metric("Throttle raw", str(last.get("throttle_raw", "—")))
-    e2.metric("Motor state", str(last.get("motor_state", "—")))
-    e3.metric("Motor pwm", str(last.get("motor_pwm", "—")))
-    e4.metric("RSSI", str(last.get("rssi", "—")))
-    e5.metric("Hall Δ", str(last.get("hall_delta", "—")))
-    e6.metric("FW src", str(last.get("fw_src", "—")))
-else:
-    # Still show fw_src if present in scooter schema
-    if "fw_src" in df.columns and df["fw_src"].notna().any():
-        st.caption(f"FW src: {last.get('fw_src')}")
+    st.markdown("## Панель приборов")
 
-# ---------- charts ----------
-c1, c2 = st.columns(2)
-c1.plotly_chart(make_line(df, "u_batt_v", "Battery Voltage", "V"), use_container_width=True)
-c2.plotly_chart(make_line(df, "i_batt_a", "Battery Current", "A"), use_container_width=True)
+    g1, g2, g3, g4, g5 = st.columns(5)
 
-c3, c4 = st.columns(2)
-c3.plotly_chart(make_line(df, "speed_kmh_filt", "Speed", "km/h"), use_container_width=True)
-c4.plotly_chart(make_line(df, "t_batt_c", "Battery Temp", "°C"), use_container_width=True)
+    g1.plotly_chart(
+        make_gauge(
+            last.get("speed_kmh_filt"),
+            "Speed",
+            0,
+            50,
+            "km/h",
+            thresholds=[
+                {'range': [0, 20], 'color': "lightgreen"},
+                {'range': [20, 35], 'color': "yellow"},
+                {'range': [35, 50], 'color': "red"},
+            ],
+        ),
+        use_container_width=True,
+    )
 
-st.plotly_chart(make_line(df, "t_ctrl_c", "Controller Temp", "°C"), use_container_width=True)
-st.plotly_chart(make_line(df, "soc", "SOC (0..1)"), use_container_width=True)
+    soc_percent = (last.get("soc") or 0) * 100
 
-st.markdown("### Последние сообщения")
-st.dataframe(df.tail(50), use_container_width=True)
+    g2.plotly_chart(
+        make_gauge(
+            soc_percent,
+            "SOC",
+            0,
+            100,
+            "%",
+            thresholds=[
+                {'range': [0, 20], 'color': "red"},
+                {'range': [20, 60], 'color': "yellow"},
+                {'range': [60, 100], 'color': "lightgreen"},
+            ],
+        ),
+        use_container_width=True,
+    )
+
+    g3.plotly_chart(
+        make_gauge(
+            last.get("u_batt_v"),
+            "U batt",
+            11,
+            13,
+            "V",
+            thresholds=[
+                {'range': [11, 11.5], 'color': "red"},
+                {'range': [11.5, 12.2], 'color': "yellow"},
+                {'range': [12.2, 13], 'color': "lightgreen"},
+            ],
+        ),
+        use_container_width=True,
+    )
+
+    g4.plotly_chart(
+        make_gauge(
+            last.get("t_batt_c"),
+            "T batt",
+            0,
+            80,
+            "°C",
+            thresholds=[
+                {'range': [0, 50], 'color': "lightgreen"},
+                {'range': [50, 65], 'color': "yellow"},
+                {'range': [65, 80], 'color': "red"},
+            ],
+        ),
+        use_container_width=True,
+    )
+
+    g5.plotly_chart(
+        make_gauge(
+            last.get("i_batt_a"),
+            "I batt",
+            -5,
+            20,
+            "A",
+            thresholds=[
+                {'range': [-5, 0], 'color': "lightblue"},
+                {'range': [0, 10], 'color': "lightgreen"},
+                {'range': [10, 15], 'color': "yellow"},
+                {'range': [15, 20], 'color': "red"},
+            ],
+        ),
+        use_container_width=True,
+    )
+
+    # -------- ESP / MQTT поля --------
+    extra_cols = ["throttle_raw", "motor_state", "motor_pwm", "rssi", "hall_pulses", "hall_delta", "fw_src"]
+    have_extra = any(c in df.columns and df[c].notna().any() for c in extra_cols)
+
+    if have_extra:
+        st.markdown("### ESP / MQTT поля")
+
+        e1, e2, e3, e4, e5, e6 = st.columns(6)
+
+        e1.metric("Throttle raw", str(last.get("throttle_raw", "—")))
+        e2.metric("Motor state", str(last.get("motor_state", "—")))
+        e3.metric("Motor pwm", str(last.get("motor_pwm", "—")))
+        e4.metric("RSSI", str(last.get("rssi", "—")))
+        e5.metric("Hall Δ", str(last.get("hall_delta", "—")))
+        e6.metric("FW src", str(last.get("fw_src", "—")))
+
+    # -------- графики --------
+
+    c1, c2 = st.columns(2)
+
+    c1.plotly_chart(
+        make_line(df, "u_batt_v", "Battery Voltage", "V"),
+        use_container_width=True,
+    )
+
+    c2.plotly_chart(
+        make_line(df, "i_batt_a", "Battery Current", "A"),
+        use_container_width=True,
+    )
+
+    c3, c4 = st.columns(2)
+
+    c3.plotly_chart(
+        make_line(df, "speed_kmh_filt", "Speed", "km/h"),
+        use_container_width=True,
+    )
+
+    c4.plotly_chart(
+        make_line(df, "t_batt_c", "Battery Temp", "°C"),
+        use_container_width=True,
+    )
+
+    st.plotly_chart(
+        make_line(df, "t_ctrl_c", "Controller Temp", "°C"),
+        use_container_width=True,
+    )
+
+    st.plotly_chart(
+        make_line(df, "soc", "SOC (0..1)"),
+        use_container_width=True,
+    )
+
+    # -------- последние сообщения --------
+    st.markdown("### Последние сообщения")
+    st.dataframe(df.tail(50), use_container_width=True)
+
+
+
+# ================================
+# ВКЛАДКА 2 — СОСТОЯНИЕ САМОКАТА
+# ================================
+with tab2:
+
+    st.header("Состояние электросамоката")
+
+    status, color, issues = scooter_health(last)
+
+    scooter_img = colorize_scooter("scooter.jpg", color)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        st.image(scooter_img, width=500)
+
+    if color == "green":
+        st.success("Состояние: ОТЛИЧНО")
+
+    elif color == "yellow":
+        st.warning("Состояние: ХОРОШО")
+
+    else:
+        st.error("Состояние: ПЛОХО")
+
+    st.subheader("Автоматический отчет")
+
+report = build_detailed_report(df, last)
+st.text(report)
+
+if issues:
+        st.markdown("### Выявленные проблемы")
+
+        for issue in issues:
+            st.write("•", issue)
