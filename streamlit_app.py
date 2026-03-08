@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
 
 # ===== Optional deps =====
 try:
@@ -141,6 +142,96 @@ def colorize_scooter(img_path, color):
     data[scooter_mask] = [r,g,b,255]
 
     return Image.fromarray(data)
+
+def render_motion_bar(speed, max_speed=50):
+    try:
+        speed = float(speed) if speed is not None and not pd.isna(speed) else 0.0
+    except Exception:
+        speed = 0.0
+
+    speed = max(0.0, min(speed, float(max_speed)))
+    pct = speed / float(max_speed)
+
+    if speed < 15:
+        glow = "#7CFC00"
+    elif speed < 30:
+        glow = "#FFD700"
+    else:
+        glow = "#FF4D4D"
+
+    left_pct = 4 + pct * 88
+    fill_pct = pct * 92
+
+    return f"""
+    <html>
+    <body style="margin:0; background:transparent; font-family:Arial, sans-serif;">
+        <div style="
+            width:100%;
+            height:110px;
+            position:relative;
+            border-radius:20px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.08);
+            overflow:hidden;
+        ">
+            <div style="
+                position:absolute;
+                left:4%;
+                top:68px;
+                width:92%;
+                height:8px;
+                border-radius:999px;
+                background:rgba(255,255,255,0.10);
+            "></div>
+
+            <div style="
+                position:absolute;
+                left:4%;
+                top:68px;
+                width:{fill_pct:.1f}%;
+                height:8px;
+                border-radius:999px;
+                background:{glow};
+                box-shadow:0 0 12px {glow};
+            "></div>
+
+            <div style="
+                position:absolute;
+                left:{left_pct:.1f}%;
+                top:18px;
+                transform:translateX(-50%);
+                font-size:42px;
+            ">🛴</div>
+
+            <div style="
+                position:absolute;
+                right:16px;
+                top:14px;
+                color:white;
+                font-size:18px;
+                font-weight:700;
+            ">{speed:.1f} км/ч</div>
+
+            <div style="
+                position:absolute;
+                left:16px;
+                bottom:10px;
+                color:rgba(255,255,255,0.6);
+                font-size:13px;
+            ">Старт</div>
+
+            <div style="
+                position:absolute;
+                right:16px;
+                bottom:10px;
+                color:rgba(255,255,255,0.6);
+                font-size:13px;
+            ">Макс. скорость</div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
 def scooter_health(last):
     score = 0
@@ -352,6 +443,102 @@ def build_detailed_report(df, last):
 
     return "\n".join(lines)
 
+def simulate_route(df, start_lat=59.9343, start_lon=30.3351):
+    lat = start_lat
+    lon = start_lon
+    coords = []
+
+    prev_ts = None
+
+    for _, row in df.iterrows():
+        speed = row.get("speed_kmh_filt")
+        ts = row.get("ts")
+
+        try:
+            speed = float(speed) if speed is not None and not pd.isna(speed) else 0.0
+        except Exception:
+            speed = 0.0
+
+        if prev_ts is None or pd.isna(ts) or pd.isna(prev_ts):
+            dt = 1.0
+        else:
+            dt = max(0.5, min((ts - prev_ts).total_seconds(), 5.0))
+
+        prev_ts = ts
+
+        # км/ч -> очень маленький шаг по координатам
+        distance_factor = speed * dt / 1110000.0
+
+        lat += distance_factor
+        lon += distance_factor * 0.7
+
+        coords.append([lat, lon])
+
+    return pd.DataFrame(coords, columns=["lat", "lon"])
+    return route
+
+def make_route_map(route, speed_series=None):
+    import plotly.graph_objects as go
+
+    if route is None or route.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            template="plotly_dark",
+            height=520,
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
+        return fig
+
+    lat_center = float(route["lat"].mean())
+    lon_center = float(route["lon"].mean())
+
+    # Сохраняем пользовательский масштаб/позицию между автообновлениями
+    if "route_map_zoom" not in st.session_state:
+        st.session_state["route_map_zoom"] = 13
+    if "route_map_center" not in st.session_state:
+        st.session_state["route_map_center"] = {"lat": lat_center, "lon": lon_center}
+
+    fig = go.Figure()
+
+    # Тонкая линия маршрута
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=route["lat"],
+            lon=route["lon"],
+            mode="lines",
+            line=dict(width=4, color="#4FC3F7"),
+            name="Маршрут",
+            hoverinfo="skip",
+        )
+    )
+
+    # Текущая позиция
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=[route["lat"].iloc[-1]],
+            lon=[route["lon"].iloc[-1]],
+            mode="markers",
+            marker=dict(size=14, color="#FF5252"),
+            name="Текущая позиция",
+            text=["Самокат"],
+        )
+    )
+
+    fig.update_layout(
+        mapbox=dict(
+            style="carto-darkmatter",
+            center=st.session_state["route_map_center"],
+            zoom=st.session_state["route_map_zoom"],
+        ),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=520,
+        template="plotly_dark",
+        showlegend=False,
+        uirevision="route-map-stable",
+    )
+
+    return fig
+
 # ---------- Demo loader ----------
 @st.cache_data(ttl=60)
 def load_jsonl(path):
@@ -550,7 +737,27 @@ speed_med_n = st.sidebar.slider("Медианный фильтр скорост�
 speed_max_kmh = st.sidebar.slider("Speed clamp max (km/h)", 5, 80, 50)
 speed_ema_alpha = st.sidebar.slider("Speed EMA alpha", 0.05, 0.60, 0.25)
 
+components.html(
+    """
+    <script>
+    const doc = window.parent.document;
 
+    function saveScroll() {
+        sessionStorage.setItem("m365_scroll_y", String(window.parent.scrollY || doc.documentElement.scrollTop || 0));
+    }
+
+    window.parent.addEventListener("scroll", saveScroll);
+
+    const savedY = sessionStorage.getItem("m365_scroll_y");
+    if (savedY !== null) {
+        setTimeout(() => {
+            window.parent.scrollTo(0, parseInt(savedY, 10));
+        }, 50);
+    }
+    </script>
+    """,
+    height=0,
+)
 
 # Zero-lock controls (fast drop to zero when motor stops / no pulses)
 pwm_zero_lock = st.sidebar.slider("PWM zero-lock", 0, 300, 140)
@@ -574,7 +781,7 @@ else:
     ignore_synth = st.sidebar.checkbox("Игнорировать synthetic (эмулятор)", value=True)
 
 # Autorefresh only in Live modes
-if mode.startswith("Live"):
+if mode.startswith("Live") and st.session_state.get("active_tab", 0) == 0:
     st_autorefresh(interval=refresh_sec * 1000, key="live_autorefresh")
 
     # Clear cache ONLY for Influx (MQTT isn't cached and shouldn't be cleared)
@@ -656,6 +863,7 @@ df["soc"] = df["u_batt_v"].apply(soc_from_voltage)
 df["range_km"] = df["soc"].apply(lambda s: estimate_range_km(s, 30.0))
 
 last = df.tail(1).iloc[0]
+status, color, issues = scooter_health(last)
 
 
 def fmt_num(v, d=2):
@@ -664,13 +872,25 @@ def fmt_num(v, d=2):
         return "—"
     return f"{float(v):.{d}f}"
 
-tab1, tab2 = st.tabs(["Панель приборов", "Состояние самоката"])
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = 0
+
+tab_names = ["Панель приборов", "Состояние самоката", "Маршрут и пробег"]
+
+selected_tab = st.radio(
+    "",
+    tab_names,
+    index=st.session_state.active_tab,
+    horizontal=True
+)
+
+st.session_state.active_tab = tab_names.index(selected_tab)
 
 
 # ================================
 # ВКЛАДКА 1 — ПАНЕЛЬ ПРИБОРОВ
 # ================================
-with tab1:
+if st.session_state.active_tab == 0:
 
     st.markdown("## Панель приборов")
 
@@ -820,8 +1040,7 @@ with tab1:
 # ================================
 # ВКЛАДКА 2 — СОСТОЯНИЕ САМОКАТА
 # ================================
-with tab2:
-
+if st.session_state.active_tab == 1:
     st.header("Состояние электросамоката")
 
     status, color, issues = scooter_health(last)
@@ -844,11 +1063,47 @@ with tab2:
 
     st.subheader("Автоматический отчет")
 
-report = build_detailed_report(df, last)
-st.text(report)
+    report = build_detailed_report(df, last)
+    st.text(report)
 
 if issues:
         st.markdown("### Выявленные проблемы")
 
         for issue in issues:
             st.write("•", issue)
+
+if st.session_state.active_tab == 2:
+    st.header("Маршрут и запас хода")
+
+    range_km = last.get("range_km")
+
+    if range_km is None:
+        st.info("Недостаточно данных для расчёта пробега")
+    else:
+        st.subheader("Оставшийся пробег")
+
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.metric("Estimated Range", f"{range_km:.1f} km")
+
+        with col2:
+            max_range = 30
+            progress = min(range_km / max_range, 1.0)
+            st.progress(progress)
+
+        components.html(
+            render_motion_bar(last.get("speed_kmh_filt"), max_speed=speed_max_kmh),
+            height=130,
+            scrolling=False,
+        )
+
+    st.subheader("Карта поездки")
+
+    route = simulate_route(df)
+
+    if not route.empty:
+        fig_map = make_route_map(route)
+        st.plotly_chart(fig_map, use_container_width=True)
+    else:
+        st.info("Недостаточно данных для построения маршрута")
