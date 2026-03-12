@@ -5,13 +5,17 @@ import time
 import json
 import threading
 import queue
+import base64
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import urllib.request
 from streamlit_autorefresh import st_autorefresh
+from pathlib import Path
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import streamlit.components.v1 as components
 
 # ===== Optional deps =====
@@ -726,6 +730,8 @@ def get_mqtt_queue(host, port, topic, ignore_synth):
     return st.session_state["mqtt_q"]
 
 
+
+
 # ---------- UI ----------
 st.title("M365 Digital Twin Dashboard")
 
@@ -737,27 +743,7 @@ speed_med_n = st.sidebar.slider("Медианный фильтр скорост�
 speed_max_kmh = st.sidebar.slider("Speed clamp max (km/h)", 5, 80, 50)
 speed_ema_alpha = st.sidebar.slider("Speed EMA alpha", 0.05, 0.60, 0.25)
 
-components.html(
-    """
-    <script>
-    const doc = window.parent.document;
 
-    function saveScroll() {
-        sessionStorage.setItem("m365_scroll_y", String(window.parent.scrollY || doc.documentElement.scrollTop || 0));
-    }
-
-    window.parent.addEventListener("scroll", saveScroll);
-
-    const savedY = sessionStorage.getItem("m365_scroll_y");
-    if (savedY !== null) {
-        setTimeout(() => {
-            window.parent.scrollTo(0, parseInt(savedY, 10));
-        }, 50);
-    }
-    </script>
-    """,
-    height=0,
-)
 
 # Zero-lock controls (fast drop to zero when motor stops / no pulses)
 pwm_zero_lock = st.sidebar.slider("PWM zero-lock", 0, 300, 140)
@@ -774,14 +760,14 @@ elif mode == "Live (InfluxDB)":
 
 else:
     mqtt_host = st.sidebar.text_input("MQTT host", "localhost")
-    mqtt_port = st.sidebar.number_input("MQTT port", 1, 65535, 1883)
+    mqtt_port = st.sidebar.number_input("MQTT port", 1, 65535, 1884)
     mqtt_topic = st.sidebar.text_input("Topic filter", "m365/#")
 
     # Optional: ignore synthetic stream when you're watching ESP
     ignore_synth = st.sidebar.checkbox("Игнорировать synthetic (эмулятор)", value=True)
 
-# Autorefresh only in Live modes
-if mode.startswith("Live") and st.session_state.get("active_tab", 0) == 0:
+# Autorefresh only in Live modes, but disable it on 3D tab
+if mode.startswith("Live") and st.session_state.get("active_tab", 0) != 1:
     st_autorefresh(interval=refresh_sec * 1000, key="live_autorefresh")
 
     # Clear cache ONLY for Influx (MQTT isn't cached and shouldn't be cleared)
@@ -863,6 +849,7 @@ df["soc"] = df["u_batt_v"].apply(soc_from_voltage)
 df["range_km"] = df["soc"].apply(lambda s: estimate_range_km(s, 30.0))
 
 last = df.tail(1).iloc[0]
+
 status, color, issues = scooter_health(last)
 
 
@@ -1045,19 +1032,15 @@ if st.session_state.active_tab == 1:
 
     status, color, issues = scooter_health(last)
 
-    scooter_img = colorize_scooter("scooter.jpg", color)
-
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        st.image(scooter_img, width=500)
+        components.iframe("http://127.0.0.1:8765/viewer.html", height=560, scrolling=False)
 
     if color == "green":
         st.success("Состояние: ОТЛИЧНО")
-
     elif color == "yellow":
         st.warning("Состояние: ХОРОШО")
-
     else:
         st.error("Состояние: ПЛОХО")
 
@@ -1066,9 +1049,8 @@ if st.session_state.active_tab == 1:
     report = build_detailed_report(df, last)
     st.text(report)
 
-if issues:
+    if issues:
         st.markdown("### Выявленные проблемы")
-
         for issue in issues:
             st.write("•", issue)
 
