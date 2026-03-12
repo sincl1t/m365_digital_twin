@@ -1035,7 +1035,11 @@ if st.session_state.active_tab == 1:
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
-        components.iframe("http://127.0.0.1:8765/viewer.html", height=560, scrolling=False)
+        components.iframe(
+        f"http://127.0.0.1:8765/viewer.html?color={color}",
+        height=560,
+        scrolling=False
+    )
 
     if color == "green":
         st.success("Состояние: ОТЛИЧНО")

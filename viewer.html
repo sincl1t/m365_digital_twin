@@ -4,18 +4,29 @@
   <meta charset="UTF-8">
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
   <style>
+    :root {
+      --glow: #1b2333;
+    }
+
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
-      background: #0b0f1a;
+ background: radial-gradient(
+  ellipse at center,
+  color-mix(in srgb, var(--glow) 12%, transparent) 0%,
+  color-mix(in srgb, var(--glow) 6%, transparent) 25%,
+  transparent 45%
+    ),
+    #0e1117;
       overflow: hidden;
     }
+
     model-viewer {
       width: 100%;
       height: 100vh;
-      background: #0b0f1a;
+      background: transparent;
     }
   </style>
 </head>
@@ -26,8 +37,18 @@
     camera-controls
     auto-rotate
     shadow-intensity="1"
+    shadow-softness="0.8"
     exposure="1"
-    environment-image="neutral">
+    environment-image="neutral"
+    interaction-prompt="none"
+    camera-orbit="45deg 75deg 4m"
+    field-of-view="30deg">
   </model-viewer>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const color = params.get("color") || "#1b2333";
+    document.documentElement.style.setProperty("--glow", color);
+  </script>
 </body>
 </html>
