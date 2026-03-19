@@ -28,27 +28,96 @@
       height: 100vh;
       background: transparent;
     }
+    /* ===== OVERLAY ===== */
+
+#overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: Arial, sans-serif;
+}
+
+.callout {
+  position: absolute;
+  min-width: 150px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(10, 14, 24, 0.7);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #f3f6fb;
+  font-size: 13px;
+}
+
+.callout-title {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-bottom: 4px;
+}
+
+.callout-main {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.callout-battery { left: 20px; top: 40px; }
+.callout-control { right: 20px; top: 40px; text-align: right; }
+.callout-speed { left: 20px; bottom: 40px; }
+.callout-link { right: 20px; bottom: 40px; text-align: right; }
   </style>
 </head>
 <body>
-  <model-viewer
-    src="/assets/scooter.glb"
-    alt="3D scooter"
-    camera-controls
-    auto-rotate
-    shadow-intensity="1"
-    shadow-softness="0.8"
-    exposure="1"
-    environment-image="neutral"
-    interaction-prompt="none"
-    camera-orbit="45deg 75deg 4m"
-    field-of-view="30deg">
-  </model-viewer>
+<model-viewer
+  src="/assets/scooter.glb"
+  alt="3D scooter"
+  camera-controls
+  auto-rotate
+  shadow-intensity="1"
+  shadow-softness="0.8"
+  exposure="1"
+  environment-image="neutral"
+  interaction-prompt="none"
+  camera-orbit="45deg 75deg 4m"
+  field-of-view="30deg">
+</model-viewer>
+
+<div id="overlay">
+  <div class="callout callout-battery">
+    <div class="callout-title">Battery</div>
+    <div class="callout-main" id="battery-main">— V</div>
+  </div>
+
+  <div class="callout callout-control">
+    <div class="callout-title">Control</div>
+    <div class="callout-main" id="control-main">—</div>
+  </div>
+
+  <div class="callout callout-speed">
+    <div class="callout-title">Speed</div>
+    <div class="callout-main" id="speed-main">— km/h</div>
+  </div>
+
+  <div class="callout callout-link">
+    <div class="callout-title">Link</div>
+    <div class="callout-main" id="link-main">— dBm</div>
+  </div>
+</div>
 
   <script>
     const params = new URLSearchParams(window.location.search);
     const color = params.get("color") || "#1b2333";
     document.documentElement.style.setProperty("--glow", color);
+    const telemetry = {
+  speed: params.get("speed") || "—",
+  voltage: params.get("voltage") || "—",
+  motor: params.get("motor") || "—",
+  rssi: params.get("rssi") || "—",
+};
+
+document.getElementById("battery-main").textContent = `${telemetry.voltage} V`;
+document.getElementById("control-main").textContent = telemetry.motor;
+document.getElementById("speed-main").textContent = `${telemetry.speed} km/h`;
+document.getElementById("link-main").textContent = `${telemetry.rssi} dBm`;
   </script>
+  
 </body>
 </html>

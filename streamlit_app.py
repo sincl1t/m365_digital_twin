@@ -6,8 +6,10 @@ import json
 import threading
 import queue
 import base64
+import socket
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import pandas as pd
 import streamlit as st
@@ -17,6 +19,7 @@ from streamlit_autorefresh import st_autorefresh
 from pathlib import Path
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import streamlit.components.v1 as components
+
 
 # ===== Optional deps =====
 try:
@@ -106,19 +109,41 @@ def make_gauge(value, title, vmin, vmax, unit="", thresholds=None):
     if value is None or pd.isna(value):
         value = 0
 
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=float(value),
-        number={'suffix': f" {unit}"},
-        title={'text': title},
-        gauge={
-            'axis': {'range': [vmin, vmax]},
-            'bar': {'thickness': 0.3},
-            'steps': thresholds if thresholds else [],
-        }
-    ))
+    mid = (vmin + vmax) / 2
 
-    fig.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=float(value),
+            domain={"x": [0.12, 0.88], "y": [0.0, 1.0]},
+            title={
+                "text": title,
+                "font": {"size": 16},
+            },
+            number={
+                "suffix": f" {unit}",
+                "font": {"size": 12},
+            },
+            gauge={
+                "shape": "angular",
+                "axis": {
+                    "range": [vmin, vmax],
+                    "tickmode": "array",
+                    "tickvals": [vmin, mid, vmax],
+                    "ticktext": [f"{vmin:g}", f"{mid:g}", f"{vmax:g}"],
+                    "tickfont": {"size": 8},
+                    "tickwidth": 1,
+                },
+                "bar": {"thickness": 0.15},
+                "steps": thresholds if thresholds else [],
+            },
+        )
+    )
+
+    fig.update_layout(
+        height=200,
+        margin=dict(l=22, r=22, t=35, b=0),
+    )
     return fig
 
 from PIL import Image
@@ -235,7 +260,6 @@ def render_motion_bar(speed, max_speed=50):
     </body>
     </html>
     """
-    return html
 
 def scooter_health(last):
     score = 0
@@ -731,8 +755,43 @@ def get_mqtt_queue(host, port, topic, ignore_synth):
 
 
 
+VIEWER_HOST = "127.0.0.1"
+VIEWER_PORT = 8765
+BASE_DIR = Path(__file__).resolve().parent
 
+
+def is_port_open(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
+class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args) -> None:
+        pass
+
+
+def start_viewer_server() -> None:
+    server = ThreadingHTTPServer(
+        (VIEWER_HOST, VIEWER_PORT),
+        lambda *args, **kwargs: QuietHTTPRequestHandler(
+            *args,
+            directory=str(BASE_DIR),
+            **kwargs
+        ),
+    )
+    server.serve_forever()
+
+
+@st.cache_resource
+def ensure_viewer_server():
+    if not is_port_open(VIEWER_HOST, VIEWER_PORT):
+        thread = threading.Thread(target=start_viewer_server, daemon=True)
+        thread.start()
+    return True
 # ---------- UI ----------
+ensure_viewer_server()
+
 st.title("M365 Digital Twin Dashboard")
 
 st.sidebar.header("Настройки")
@@ -881,7 +940,7 @@ if st.session_state.active_tab == 0:
 
     st.markdown("## Панель приборов")
 
-    g1, g2, g3, g4, g5 = st.columns(5)
+    g1, g2, g3, g4, g5 = st.columns([1.3]*5)
 
     g1.plotly_chart(
         make_gauge(
@@ -896,7 +955,7 @@ if st.session_state.active_tab == 0:
                 {'range': [35, 50], 'color': "red"},
             ],
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     soc_percent = (last.get("soc") or 0) * 100
@@ -914,7 +973,7 @@ if st.session_state.active_tab == 0:
                 {'range': [60, 100], 'color': "lightgreen"},
             ],
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     g3.plotly_chart(
@@ -930,7 +989,7 @@ if st.session_state.active_tab == 0:
                 {'range': [12.2, 13], 'color': "lightgreen"},
             ],
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     g4.plotly_chart(
@@ -946,7 +1005,7 @@ if st.session_state.active_tab == 0:
                 {'range': [65, 80], 'color': "red"},
             ],
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     g5.plotly_chart(
@@ -963,7 +1022,7 @@ if st.session_state.active_tab == 0:
                 {'range': [15, 20], 'color': "red"},
             ],
         ),
-        use_container_width=True,
+        width="stretch",
     )
 
     # -------- ESP / MQTT поля --------
@@ -1031,15 +1090,27 @@ if st.session_state.active_tab == 1:
     st.header("Состояние электросамоката")
 
     status, color, issues = scooter_health(last)
-
     col1, col2, col3 = st.columns([1, 2, 1])
+
+    telemetry = {
+        "color": color,
+        "speed": fmt_num(last.get("speed_kmh_filt"), 1),
+        "voltage": fmt_num(last.get("u_batt_v"), 2),
+        "soc": fmt_num((last.get("soc") or 0) * 100, 0),
+        "temp": fmt_num(last.get("t_batt_c"), 1),
+        "motor": str(last.get("motor_state", "—")),
+        "pwm": str(last.get("motor_pwm", "—")),
+        "rssi": str(last.get("rssi", "—")),
+    }
+
+    viewer_url = f"http://{VIEWER_HOST}:{VIEWER_PORT}/viewer.html?{urlencode(telemetry)}"
 
     with col2:
         components.iframe(
-        f"http://127.0.0.1:8765/viewer.html?color={color}",
-        height=560,
-        scrolling=False
-    )
+            viewer_url,
+            height=560,
+            scrolling=False
+        )
 
     if color == "green":
         st.success("Состояние: ОТЛИЧНО")
@@ -1049,7 +1120,6 @@ if st.session_state.active_tab == 1:
         st.error("Состояние: ПЛОХО")
 
     st.subheader("Автоматический отчет")
-
     report = build_detailed_report(df, last)
     st.text(report)
 
@@ -1058,6 +1128,10 @@ if st.session_state.active_tab == 1:
         for issue in issues:
             st.write("•", issue)
 
+
+# ================================
+# ВКЛАДКА 3 — МАРШРУТ И ПРОБЕГ
+# ================================
 if st.session_state.active_tab == 2:
     st.header("Маршрут и запас хода")
 
